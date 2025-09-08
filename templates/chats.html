@@ -1,151 +1,166 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8">
-<title>SkyMessage — Чат</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="UTF-8">
+<title>SkyMessage — Чаты</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}
-body{height:100vh;display:flex;background:#1e1e1e;color:#eee;}
-aside{width:300px;background:#2b2b2b;display:flex;flex-direction:column;border-right:1px solid #444;}
-#searchContainer{padding:10px;}
-#searchContainer input{width:100%;padding:6px;border-radius:5px;border:1px solid #555;background:#3a3a3a;color:#eee;}
-#searchContainer button{margin-top:5px;width:100%;padding:6px;border:none;border-radius:5px;background:#4caf50;color:#fff;cursor:pointer;}
-#searchResult{margin-top:5px;font-size:0.9em;color:#ccc;}
-#chatList{flex:1;overflow-y:auto;list-style:none;}
-#chatList li{padding:8px;border-bottom:1px solid #444;cursor:pointer;border-radius:5px;}
-#chatList li:hover{background:#3a3a3a;}
-main{flex:1;display:flex;flex-direction:column;position:relative;}
-header{height:50px;border-bottom:1px solid #444;display:flex;align-items:center;padding:0 10px;font-weight:bold;}
-#messages{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px;}
-footer{height:50px;border-top:1px solid #444;display:flex;align-items:center;gap:5px;padding:0 5px;}
-footer input[type=text]{flex:1;padding:6px;border-radius:5px;border:1px solid #555;background:#3a3a3a;color:#eee;}
-footer button{padding:6px 10px;border:none;border-radius:5px;background:#4caf50;color:#fff;cursor:pointer;}
-.msg{max-width:70%;padding:6px 10px;border-radius:12px;word-wrap:break-word;}
-.mine{align-self:flex-end;background:#4caf50;color:#fff;border-bottom-right-radius:3px;}
-.other{align-self:flex-start;background:#444;color:#eee;border-bottom-left-radius:3px;}
-.timestamp{font-size:0.7em;color:#aaa;margin-top:2px;text-align:right;}
-video{border:1px solid #555;border-radius:5px;position:absolute;}
-#localVideo{width:150px;height:150px;bottom:10px;right:10px;display:none;}
-#remoteVideo{width:300px;height:300px;bottom:170px;right:10px;display:none;}
+body { margin:0; font-family:sans-serif; background:#111; color:#eee; display:flex; height:100vh; }
+aside { width:300px; background:#222; border-right:1px solid #333; display:flex; flex-direction:column; }
+header, footer { background:#222; border-bottom:1px solid #333; padding:10px; }
+#chatList { flex:1; overflow-y:auto; padding:0; margin:0; list-style:none; }
+#chatList li { padding:10px; border-bottom:1px solid #333; cursor:pointer; }
+#messages { flex:1; overflow-y:auto; padding:10px; }
+.message { padding:8px; border-radius:10px; margin-bottom:5px; max-width:70%; }
+.message.mine { background:#0f0; margin-left:auto; text-align:right; }
+.message.peer { background:#333; text-align:left; }
+input, button { padding:8px; border-radius:8px; border:none; }
+input { flex:1; margin-right:5px; }
+footer { display:flex; }
+video { border:2px solid #555; border-radius:10px; position:absolute; right:20px; bottom:20px; }
+#remoteVideo { width:320px; height:240px; display:none; }
+#localVideo { width:160px; height:120px; display:none; }
 </style>
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 <body>
 
 <aside>
-  <div id="searchContainer">
-    <input id="searchInput" type="text" placeholder="Найти пользователя"/>
-    <button id="searchBtn">Найти</button>
-    <div id="searchResult"></div>
+  <header>
+    <div>SkyMessage</div>
+  </header>
+  <div style="padding:10px;">
+    <input id="searchInput" placeholder="Найти пользователя">
+    <button id="searchBtn">🔍</button>
+    <div id="searchResult" style="margin-top:5px;"></div>
   </div>
   <ul id="chatList"></ul>
 </aside>
 
-<main>
+<main style="flex:1; display:flex; flex-direction:column;">
   <header id="chatHeader">Выберите чат</header>
   <div id="messages"></div>
   <footer>
-    <input id="msgInput" type="text" placeholder="Сообщение"/>
-    <input type="file" id="fileInput" accept="image/*,video/*" style="display:none;"/>
-    <button id="fileBtn">📎</button>
-    <button id="callBtn">📞</button>
+    <input id="msgInput" placeholder="Сообщение">
     <button id="sendBtn">Отправить</button>
+    <button id="callBtn">📞 Звонок</button>
   </footer>
-  <video id="localVideo" autoplay muted></video>
-  <video id="remoteVideo" autoplay></video>
 </main>
 
+<video id="localVideo" autoplay muted></video>
+<video id="remoteVideo" autoplay></video>
+
 <script>
-let me=null, chats=[], selectedChatId=null;
-const socket = io(window.location.origin, {withCredentials:true});
+let me = null;
+let selectedChatId = null;
+const socket = io();
 
-function fmtTime(iso){ if(!iso) return ''; return new Date(iso).toLocaleString(); }
+function fmtTime(iso){ return iso ? new Date(iso).toLocaleTimeString() : ''; }
 
-async function fetchMe(){
-  const res = await fetch('/api/me', {credentials:'same-origin'});
-  if(res.ok){ me=(await res.json()).user; }
-  else{ alert('Вы не авторизованы!'); window.location='/login.html'; }
-}
-
+async function fetchMe(){ const r = await fetch('/api/me'); me=(await r.json()).user; }
 async function fetchChats(){
-  const res = await fetch('/api/chats', {credentials:'same-origin'});
-  if(!res.ok) return;
-  chats = await res.json();
+  const r = await fetch('/api/chats'); const chats = await r.json();
   const list = document.getElementById('chatList'); list.innerHTML='';
   chats.forEach(c=>{
     const li = document.createElement('li');
-    li.textContent = c.name || c.peer?.username || 'Чат';
-    li.onclick = ()=>selectChat(c.id,c.peer?.username||c.name||'');
+    li.textContent = c.name || "Без имени";
+    li.onclick=()=>selectChat(c.id,c.name);
     list.appendChild(li);
   });
 }
 
-async function selectChat(chatId,peerName){
-  selectedChatId = chatId;
-  document.getElementById('chatHeader').textContent='@'+peerName;
-  document.getElementById('messages').innerHTML='';
-  socket.emit('join_chat',{chat_id:chatId});
-  const res = await fetch('/api/messages/'+chatId, {credentials:'same-origin'});
-  if(!res.ok) return;
-  const msgs = await res.json(); msgs.forEach(renderMsg);
+async function selectChat(id,name){
+  selectedChatId = id;
+  document.getElementById('chatHeader').textContent=name;
+  const r = await fetch('/api/messages/'+id);
+  const msgs = await r.json();
+  const messagesDiv = document.getElementById('messages');
+  messagesDiv.innerHTML='';
+  msgs.forEach(m=>renderMsg(m));
 }
 
 function renderMsg(m){
   const div=document.createElement('div');
-  div.className='msg '+(m.sender_id===me.id?'mine':'other');
-  div.innerHTML=`<div>${m.text||''}</div><div class="timestamp">${fmtTime(m.timestamp)}</div>`;
+  div.className='message '+(m.sender_id===me.id?'mine':'peer');
+  div.innerHTML = `<div>${m.text}</div><div style="font-size:10px;color:#888">${fmtTime(m.timestamp)}</div>`;
   document.getElementById('messages').appendChild(div);
-  document.getElementById('messages').scrollTop=document.getElementById('messages').scrollHeight;
+  document.getElementById('messages').scrollTop = 99999;
 }
 
+// --- Отправка ---
 document.getElementById('sendBtn').onclick = async ()=>{
-  const text = document.getElementById('msgInput').value.trim();
+  const text=document.getElementById('msgInput').value.trim();
   if(!text || !selectedChatId) return;
-  const res = await fetch('/api/send_message',{
+  const r = await fetch('/api/send_message',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    credentials:'same-origin',
-    body:JSON.stringify({chat_id:selectedChatId,text})
+    body:JSON.stringify({chat_id:selectedChatId, text})
   });
-  if(res.ok) document.getElementById('msgInput').value='';
+  if(r.ok) document.getElementById('msgInput').value='';
 };
 
+// --- Поиск пользователей ---
 document.getElementById('searchBtn').onclick = async ()=>{
   const q = document.getElementById('searchInput').value.trim();
-  const resDiv = document.getElementById('searchResult'); resDiv.textContent='Поиск...';
-  const res = await fetch('/api/search_user',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({query:q})});
-  const j = await res.json();
-  if(!j.user){ resDiv.textContent='Никто не найден'; return; }
-  resDiv.innerHTML=`Найден: @${j.user.username} <button onclick="startChat(${j.user.id})">Открыть чат</button>`;
-};
-
-async function startChat(peerId){
-  const res = await fetch('/api/create_chat',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({peer_id:peerId})});
-  const j = await res.json();
-  await fetchChats(); selectChat(j.chat_id,'');
+  const res = document.getElementById('searchResult');
+  if(!q){ res.textContent='Введите логин'; return; }
+  res.textContent='Поиск...';
+  const r = await fetch('/api/users?q='+encodeURIComponent(q));
+  const users = await r.json();
+  if(users.length===0){ res.textContent='Никто не найден'; return; }
+  const u = users[0];
+  res.innerHTML=`Найден: <b>@${u.username}</b> <button id="startChat">Открыть чат</button>`;
+  document.getElementById('startChat').onclick = async ()=>{
+    const r2 = await fetch('/api/create_chat',{
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({user_ids:[u.id]})
+    });
+    const j2 = await r2.json();
+    await fetchChats();
+    selectChat(j2.chat_id,u.username);
+  };
 }
 
-// WebRTC
-let localStream, pc;
-document.getElementById('callBtn').onclick=async()=>{
-  localStream=await navigator.mediaDevices.getUserMedia({audio:true,video:true});
+// --- WebRTC звонки ---
+let pc, localStream;
+
+document.getElementById('callBtn').onclick = async ()=>{
+  if(!selectedChatId) return alert("Выберите чат");
+  localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
   document.getElementById('localVideo').srcObject=localStream;
   document.getElementById('localVideo').style.display='block';
-  pc=new RTCPeerConnection();
-  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
-  pc.ontrack=e=>{ document.getElementById('remoteVideo').srcObject=e.streams[0]; document.getElementById('remoteVideo').style.display='block'; };
-  pc.onicecandidate=e=>{ if(e.candidate) socket.emit('webrtc_ice',{candidate:e.candidate,chat_id:selectedChatId}); };
-  const offer=await pc.createOffer(); await pc.setLocalDescription(offer);
-  socket.emit('webrtc_offer',{sdp:offer,chat_id:selectedChatId});
-};
 
-// Socket.IO
-socket.on('message', m=>{ if(m.chat_id===selectedChatId) renderMsg(m); else fetchChats(); });
-socket.on('webrtc_offer', async m=>{ if(m.chat_id!==selectedChatId) return; localStream=await navigator.mediaDevices.getUserMedia({audio:true,video:true}); pc=new RTCPeerConnection(); localStream.getTracks().forEach(t=>pc.addTrack(t,localStream)); pc.ontrack=e=>{ document.getElementById('remoteVideo').srcObject=e.streams[0]; document.getElementById('remoteVideo').style.display='block'; }; pc.onicecandidate=e=>{ if(e.candidate) socket.emit('webrtc_ice',{candidate:e.candidate,chat_id:selectedChatId}); }; await pc.setRemoteDescription(new RTCSessionDescription(m.sdp)); const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); socket.emit('webrtc_answer',{sdp:answer,chat_id:selectedChatId}); });
+  pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  localStream.getTracks().forEach(track=>pc.addTrack(track,localStream));
+  pc.ontrack = e => { document.getElementById('remoteVideo').srcObject = e.streams[0]; document.getElementById('remoteVideo').style.display='block'; };
+  pc.onicecandidate = e => { if(e.candidate) socket.emit('webrtc_ice',{candidate:e.candidate, chat_id:selectedChatId}); };
+
+  const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+  socket.emit('webrtc_offer',{sdp:offer, chat_id:selectedChatId});
+}
+
+// --- Socket.IO сигнализация ---
+socket.on('webrtc_offer', async m=>{
+  if(m.chat_id!==selectedChatId) return;
+  localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  document.getElementById('localVideo').srcObject = localStream; document.getElementById('localVideo').style.display='block';
+
+  pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  localStream.getTracks().forEach(track=>pc.addTrack(track,localStream));
+  pc.ontrack = e => { document.getElementById('remoteVideo').srcObject = e.streams[0]; document.getElementById('remoteVideo').style.display='block'; };
+  pc.onicecandidate = e => { if(e.candidate) socket.emit('webrtc_ice',{candidate:e.candidate, chat_id:selectedChatId}); };
+
+  await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
+  const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+  socket.emit('webrtc_answer',{sdp:answer, chat_id:selectedChatId});
+});
+
 socket.on('webrtc_answer', async m=>{ await pc.setRemoteDescription(new RTCSessionDescription(m.sdp)); });
 socket.on('webrtc_ice', m=>{ if(pc) pc.addIceCandidate(new RTCIceCandidate(m.candidate)); });
 
+// --- Сообщения ---
+socket.on('message', m => { if(m.chat_id===selectedChatId) renderMsg(m); else fetchChats(); });
+
+// --- Инициализация ---
 (async()=>{ await fetchMe(); await fetchChats(); })();
 </script>
 </body>
