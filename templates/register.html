@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Регистрация | SkyMessage</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 flex items-center justify-center h-screen">
+<div class="bg-white p-8 rounded shadow-md w-96">
+  <h1 class="text-2xl font-bold mb-6 text-center">Регистрация</h1>
+  <div class="mb-4">
+    <input id="regUser" type="text" placeholder="Логин" class="w-full p-2 border rounded">
+  </div>
+  <div class="mb-4">
+    <input id="regPass" type="password" placeholder="Пароль" class="w-full p-2 border rounded">
+  </div>
+  <button id="registerBtn" class="w-full bg-green-500 text-white py-2 rounded hover:bg-green-600 transition">Зарегистрироваться</button>
+  <p class="mt-4 text-center text-sm">
+    Уже есть аккаунт? <a href="/login.html" class="text-blue-500 hover:underline">Войти</a>
+  </p>
+</div>
+
+<script>
+document.getElementById('registerBtn').addEventListener('click', async ()=>{
+  const username = document.getElementById('regUser').value.trim();
+  const password = document.getElementById('regPass').value.trim();
+  if(!username || !password){ alert('Введите логин и пароль'); return; }
+
+  const res = await fetch('/register', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username,password})
+  });
+  const data = await res.json();
+  if(data.ok) window.location.href='/chats.html';
+  else if(data.error==='exists') alert('Пользователь уже существует');
+  else alert('Ошибка регистрации');
+});
+</script>
+</body>
+</html>
