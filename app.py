@@ -1,17 +1,17 @@
-from flask import Flask, render_template, request, session, jsonify, redirect, url_for, abort
+from flask import Flask, render_template, request, session, jsonify, abort, redirect, url_for
 from flask_socketio import SocketIO, join_room, emit
 from werkzeug.security import generate_password_hash, check_password_hash
 from extensions import db
 from models import User, Chat, Message
-import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY","devsecret")
+app.config['SECRET_KEY'] = 'devsecret'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///skychat.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
 
+# --- Helpers ---
 def current_user():
     uid = session.get('user_id')
     return User.query.get(uid) if uid else None
@@ -25,9 +25,14 @@ def login_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+# --- Routes ---
 @app.route('/')
 def home():
-    return redirect(url_for('login_page'))
+    return redirect(url_for('welcome'))
+
+@app.route('/welcome')
+def welcome():
+    return render_template('welcome.html')
 
 @app.route('/login.html')
 def login_page():
@@ -42,7 +47,7 @@ def register_page():
 def chats_page():
     return render_template('chats.html')
 
-# --- Auth ---
+# --- Auth API ---
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json or {}
@@ -52,8 +57,9 @@ def register():
         return jsonify({'error':'empty'}), 400
     if User.query.filter_by(username=username).first():
         return jsonify({'error':'exists'}), 400
-    user = User(username=username,password_hash=generate_password_hash(password))
-    db.session.add(user); db.session.commit()
+    user = User(username=username, password_hash=generate_password_hash(password))
+    db.session.add(user)
+    db.session.commit()
     session['user_id'] = user.id
     return jsonify({'ok': True})
 
@@ -63,7 +69,7 @@ def login():
     username = (data.get('username') or '').strip()
     password = (data.get('password') or '').strip()
     user = User.query.filter_by(username=username).first()
-    if user and check_password_hash(user.password_hash,password):
+    if user and check_password_hash(user.password_hash, password):
         session['user_id'] = user.id
         return jsonify({'ok': True})
     return jsonify({'error':'wrong'}), 401
@@ -71,7 +77,7 @@ def login():
 @app.route('/logout', methods=['POST'])
 @login_required
 def logout():
-    session.pop('user_id',None)
+    session.pop('user_id', None)
     return jsonify({'ok': True})
 
 # --- API ---
@@ -79,18 +85,27 @@ def logout():
 @login_required
 def api_me():
     u = current_user()
-    return jsonify({'user':{'id':u.id,'username':u.username}})
+    return jsonify({'user': {'id': u.id, 'username': u.username}})
 
 @app.route('/api/chats')
 @login_required
 def api_chats():
     u = current_user()
     chats = Chat.query.filter(Chat.members.any(id=u.id)).all()
-    result=[]
+    result = []
     for c in chats:
         last = Message.query.filter_by(chat_id=c.id).order_by(Message.timestamp.desc()).first()
-        result.append({'id':c.id,'name':c.name,'last':{'text':last.text if last else '', 'timestamp': last.timestamp.isoformat() if last else None}})
-    result.sort(key=lambda x:x['last']['timestamp'] or '', reverse=True)
+        peer = [m for m in c.members if m.id != u.id][0] if len(c.members) > 1 else u
+        result.append({
+            'id': c.id,
+            'name': c.name,
+            'peer': {'id': peer.id, 'username': peer.username},
+            'last': {
+                'text': last.text if last else '',
+                'timestamp': last.timestamp.isoformat() if last else None
+            }
+        })
+    result.sort(key=lambda x: x['last']['timestamp'] or '', reverse=True)
     return jsonify(result)
 
 @app.route('/api/messages/<int:chat_id>')
@@ -98,38 +113,53 @@ def api_chats():
 def api_messages(chat_id):
     u = current_user()
     chat = Chat.query.get_or_404(chat_id)
-    if u not in chat.members: abort(403)
+    if u not in chat.members:
+        abort(403)
     msgs = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
-    return jsonify([{'id':m.id,'text':m.text,'sender_id':m.sender_id,'timestamp':m.timestamp.isoformat()} for m in msgs])
+    return jsonify([{'id': m.id, 'text': m.text, 'sender_id': m.sender_id, 'timestamp': m.timestamp.isoformat()} for m in msgs])
 
 @app.route('/api/send_message', methods=['POST'])
 @login_required
 def api_send_message():
     u = current_user()
     data = request.json or {}
-    chat_id = int(data.get('chat_id',0))
+    chat_id = int(data.get('chat_id', 0))
     text = (data.get('text') or '').strip()
-    if not chat_id or not text: return jsonify({'error':'empty'}),400
+    if not chat_id or not text:
+        return jsonify({'error':'empty'}), 400
     chat = Chat.query.get_or_404(chat_id)
-    if u not in chat.members: abort(403)
+    if u not in chat.members:
+        abort(403)
     msg = Message(chat_id=chat.id, sender_id=u.id, text=text)
-    db.session.add(msg); db.session.commit()
-    payload={'id':msg.id,'chat_id':chat.id,'sender_id':u.id,'text':msg.text,'timestamp':msg.timestamp.isoformat()}
-    socketio.emit('message',payload,room=f"chat_{chat.id}")
+    db.session.add(msg)
+    db.session.commit()
+    payload = {'id': msg.id, 'chat_id': chat.id, 'sender_id': u.id, 'text': msg.text, 'timestamp': msg.timestamp.isoformat()}
+    socketio.emit('message', payload, room=f"chat_{chat.id}")
     return jsonify(payload)
+
+@app.route('/api/search_user', methods=['POST'])
+@login_required
+def api_search_user():
+    data = request.json or {}
+    q = (data.get('query') or '').strip()
+    users = User.query.filter(User.username.contains(q)).all()
+    return jsonify({'user': users[0] if users else None})
 
 @app.route('/api/create_chat', methods=['POST'])
 @login_required
 def api_create_chat():
     data = request.json or {}
-    peer_id = data.get('peer_id')
+    user_ids = data.get('user_ids', [])
     u = current_user()
-    members = [u, User.query.get(peer_id)]
+    if u.id not in user_ids:
+        user_ids.append(u.id)
+    members = User.query.filter(User.id.in_(user_ids)).all()
     chat_name = ', '.join([m.username for m in members])
     chat = Chat(name=chat_name)
     chat.members = members
-    db.session.add(chat); db.session.commit()
-    return jsonify({'ok':True,'chat_id':chat.id})
+    db.session.add(chat)
+    db.session.commit()
+    return jsonify({'ok': True, 'chat_id': chat.id})
 
 # --- Socket.IO ---
 @socketio.on('join_chat')
@@ -153,6 +183,8 @@ def webrtc_ice(data):
 
 # --- Run ---
 if __name__ == '__main__':
+    import os
+    port = int(os.environ.get('PORT', 5000))
     with app.app_context():
         db.create_all()
-    socketio.run(app, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
