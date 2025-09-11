@@ -6,11 +6,12 @@ db = SQLAlchemy()
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(120), nullable=False)
+    password = db.Column(db.String(200), nullable=False)
 
 class Chat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False)
+    name = db.Column(db.String(200))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class ChatUser(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -22,4 +23,5 @@ class Message(db.Model):
     chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'))
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     text = db.Column(db.Text)
+    file = db.Column(db.String(200))
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
