@@ -1,135 +1,120 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session, render_template
 from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO, join_room, leave_room, emit
+from flask_socketio import SocketIO, join_room, emit
+from models import db, User, Chat, ChatUser, Message
 from werkzeug.security import generate_password_hash, check_password_hash
-import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
+app.config['SECRET_KEY'] = 'supersecret'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db.sqlite3'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-db = SQLAlchemy(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+db.init_app(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# --- Модели ---
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(50), unique=True)
-    password = db.Column(db.String(200))
+with app.app_context():
+    db.create_all()
 
-class Chat(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100))
+# --- HTML Routes ---
+@app.route('/')
+def welcome_page(): return render_template('welcome.html')
+@app.route('/login.html')
+def login_page(): return render_template('login.html')
+@app.route('/register.html')
+def register_page(): return render_template('register.html')
+@app.route('/chats.html')
+def chats_page(): return render_template('chats.html')
 
-class ChatMember(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-
-class Message(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'))
-    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    text = db.Column(db.String(500))
-
-# --- REST API ---
+# --- API ---
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
+    data = request.json
     if User.query.filter_by(username=data['username']).first():
-        return jsonify({"ok": False, "error": "exists"})
-    u = User(username=data['username'], password=generate_password_hash(data['password']))
-    db.session.add(u)
+        return jsonify({'ok':False,'error':'exists'})
+    user = User(username=data['username'], password=generate_password_hash(data['password']))
+    db.session.add(user)
     db.session.commit()
-    return jsonify({"ok": True})
+    session['user_id'] = user.id
+    return jsonify({'ok':True})
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    u = User.query.filter_by(username=data['username']).first()
-    if u and check_password_hash(u.password, data['password']):
-        return jsonify({"ok": True, "user": {"id": u.id, "username": u.username}})
-    return jsonify({"ok": False})
+    data = request.json
+    user = User.query.filter_by(username=data['username']).first()
+    if not user or not check_password_hash(user.password,data['password']):
+        return jsonify({'ok':False})
+    session['user_id'] = user.id
+    return jsonify({'ok':True})
 
 @app.route('/api/me')
 def me():
-    # Пока возвращаем заглушку, потом можно сделать сессии
-    return jsonify({"user": {"id": 1, "username": "TestUser"}})
-
-@app.route('/api/users')
-def users():
-    q = request.args.get('q','')
-    users = User.query.filter(User.username.contains(q)).all()
-    return jsonify([{"id": u.id, "username": u.username} for u in users])
+    uid = session.get('user_id')
+    if not uid: return jsonify({'error':'unauth'}), 401
+    u = User.query.get(uid)
+    return jsonify({'user':{'id':u.id,'username':u.username}})
 
 @app.route('/api/chats')
-def chats():
-    chats = Chat.query.all()
-    result = []
-    for c in chats:
-        last_msg = Message.query.filter_by(chat_id=c.id).order_by(Message.id.desc()).first()
-        result.append({"id": c.id, "name": c.name, "last": {"text": last_msg.text if last_msg else ""}})
+def get_chats():
+    uid = session.get('user_id')
+    if not uid: return jsonify([])
+    chats = db.session.query(Chat, Message).outerjoin(Message, Message.chat_id==Chat.id)\
+        .join(ChatUser, ChatUser.chat_id==Chat.id)\
+        .filter(ChatUser.user_id==uid)\
+        .order_by(Message.timestamp.desc().nullslast())
+    result=[]
+    for c,m in chats:
+        last_text = m.text if m else ''
+        result.append({'id':c.id,'name':c.name,'last':{'text':last_text}})
     return jsonify(result)
 
 @app.route('/api/messages/<int:chat_id>')
-def messages(chat_id):
-    msgs = Message.query.filter_by(chat_id=chat_id).all()
-    return jsonify([{"sender_id": m.sender_id, "text": m.text, "timestamp": ""} for m in msgs])
+def get_messages(chat_id):
+    uid = session.get('user_id')
+    if not uid: return jsonify([])
+    msgs = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp).all()
+    return jsonify([{'sender_id':m.sender_id,'text':m.text,'timestamp':m.timestamp.isoformat()} for m in msgs])
 
 @app.route('/api/send_message', methods=['POST'])
 def send_message():
-    data = request.get_json()
-    msg = Message(chat_id=data['chat_id'], sender_id=1, text=data['text'])
-    db.session.add(msg)
+    data = request.json
+    uid = session.get('user_id')
+    if not uid: return jsonify({'error':'unauth'}), 401
+    m = Message(chat_id=data['chat_id'], sender_id=uid, text=data['text'])
+    db.session.add(m)
     db.session.commit()
-    socketio.emit('message', {"chat_id": data['chat_id'], "sender_id": 1, "text": data['text']})
-    return jsonify({"ok": True})
+    socketio.emit('message', {'chat_id':m.chat_id,'sender_id':m.sender_id,'text':m.text,'timestamp':m.timestamp.isoformat()})
+    return jsonify({'ok':True})
+
+@app.route('/api/users')
+def search_users():
+    q = request.args.get('q','')
+    users = User.query.filter(User.username.contains(q)).all()
+    return jsonify([{'id':u.id,'username':u.username} for u in users])
 
 @app.route('/api/create_chat', methods=['POST'])
 def create_chat():
-    data = request.get_json()
-    c = Chat(name="Chat")
-    db.session.add(c)
+    data = request.json
+    uid = session.get('user_id')
+    if not uid: return jsonify({'error':'unauth'}), 401
+    names=[]
+    for u_id in data['user_ids']:
+        user = User.query.get(u_id)
+        if user: names.append(user.username)
+    name = ", ".join(names)
+    chat = Chat(name=name)
+    db.session.add(chat)
     db.session.commit()
-    for uid in data['user_ids']:
-        db.session.add(ChatMember(chat_id=c.id, user_id=uid))
+    db.session.add(ChatUser(chat_id=chat.id, user_id=uid))
+    for u_id in data['user_ids']:
+        db.session.add(ChatUser(chat_id=chat.id, user_id=u_id))
     db.session.commit()
     socketio.emit('new_chat')
-    return jsonify({"ok": True, "chat_id": c.id})
+    return jsonify({'ok':True,'chat_id':chat.id})
 
 # --- Socket.IO ---
-users_online = {}
-
-@socketio.on('register')
-def handle_register(data):
-    users_online[data['username']] = request.sid
-
 @socketio.on('join_chat')
-def handle_join(data):
+def on_join(data):
     join_room(data['chat_id'])
 
-@socketio.on('call_user')
-def handle_call(data):
-    to_sid = users_online.get(data['to'])
-    if to_sid:
-        emit('incoming_call', data, room=to_sid)
-
-@socketio.on('answer_call')
-def handle_answer(data):
-    to_sid = users_online.get(data['to'])
-    if to_sid:
-        emit('call_answered', data, room=to_sid)
-
-@socketio.on('end_call')
-def handle_end_call(data):
-    to_sid = users_online.get(data['to'])
-    if to_sid:
-        emit('call_ended', room=to_sid)
-
-# --- Запуск ---
-if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()  # ⚡ важно обернуть в контекст
-    port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host="0.0.0.0", port=port)
+if __name__=="__main__":
+    socketio.run(app, host="0.0.0.0", port=5000)
