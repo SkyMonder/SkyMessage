@@ -1,36 +1,42 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, request, jsonify, session
 from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO, emit, join_room
-from models import db, User, Chat, Message
+from flask_socketio import SocketIO
 from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///skymessage.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///sky.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db.init_app(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+app.config['SECRET_KEY'] = 'supersecretkey'
+db = SQLAlchemy(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-users_online = {}  # username -> sid
+# --- Models ---
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True)
+    password = db.Column(db.String(200))
 
-# --- Pages ---
-@app.route("/")
-def welcome():
-    return render_template("welcome.html")
+class Chat(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(80))
+    users = db.relationship('User', secondary='chat_user')
 
-@app.route("/register.html")
-def register_page():
-    return render_template("register.html")
+class ChatUser(db.Model):
+    __tablename__ = 'chat_user'
+    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
 
-@app.route("/login.html")
-def login_page():
-    return render_template("login.html")
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'))
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    text = db.Column(db.String(500))
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
-@app.route("/chats.html")
-def chats_page():
-    return render_template("chats.html")
+db.create_all()
 
-# --- API ---
+# --- Auth ---
 @app.route("/register", methods=["POST"])
 def register():
     data = request.json
@@ -39,6 +45,7 @@ def register():
     u = User(username=data['username'], password=generate_password_hash(data['password']))
     db.session.add(u)
     db.session.commit()
+    session['user_id'] = u.id
     return jsonify({"ok": True})
 
 @app.route("/login", methods=["POST"])
@@ -46,20 +53,29 @@ def login():
     data = request.json
     u = User.query.filter_by(username=data['username']).first()
     if u and check_password_hash(u.password, data['password']):
+        session['user_id'] = u.id
         return jsonify({"ok": True})
     return jsonify({"ok": False})
 
+@app.route("/logout")
+def logout():
+    session.pop('user_id', None)
+    return jsonify({"ok": True})
+
+# --- API ---
 @app.route("/api/me")
 def api_me():
-    # Для простоты возвращаем первого пользователя
-    u = User.query.first()
-    if u:
-        return jsonify({"user": {"id": u.id, "username": u.username}})
-    return jsonify({"user": None})
+    user_id = session.get('user_id')
+    if not user_id: return jsonify({"user": None})
+    u = User.query.get(user_id)
+    return jsonify({"user": {"id": u.id, "username": u.username}})
 
 @app.route("/api/chats")
 def api_chats():
-    chats = Chat.query.all()
+    user_id = session.get('user_id')
+    if not user_id: return jsonify([])
+    user = User.query.get(user_id)
+    chats = Chat.query.join(ChatUser).filter(ChatUser.user_id==user_id).all()
     result = []
     for c in chats:
         last = Message.query.filter_by(chat_id=c.id).order_by(Message.timestamp.desc()).first()
@@ -68,13 +84,17 @@ def api_chats():
 
 @app.route("/api/messages/<int:chat_id>")
 def api_messages(chat_id):
+    user_id = session.get('user_id')
+    if not user_id: return jsonify([])
     msgs = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp).all()
     return jsonify([{"sender_id": m.sender_id, "text": m.text, "timestamp": m.timestamp.isoformat()} for m in msgs])
 
 @app.route("/api/send_message", methods=["POST"])
 def api_send_message():
+    user_id = session.get('user_id')
+    if not user_id: return jsonify({"ok": False, "error": "not_logged_in"})
     data = request.json
-    m = Message(chat_id=data['chat_id'], sender_id=1, text=data['text'])  # Для простоты sender_id=1
+    m = Message(chat_id=data['chat_id'], sender_id=user_id, text=data['text'])
     db.session.add(m)
     db.session.commit()
     socketio.emit("message", {"chat_id": m.chat_id, "sender_id": m.sender_id, "text": m.text, "timestamp": m.timestamp.isoformat()})
@@ -88,45 +108,40 @@ def api_users():
 
 @app.route("/api/create_chat", methods=["POST"])
 def api_create_chat():
+    user_id = session.get('user_id')
+    if not user_id: return jsonify({"ok": False})
     data = request.json
-    users = data['user_ids']
+    users = [User.query.get(uid) for uid in data['user_ids'] if User.query.get(uid)]
     if not users: return jsonify({"ok": False})
-    name = "@".join([str(u) for u in users])
-    c = Chat(name=name)
+    c = Chat(name="Chat with "+", ".join([u.username for u in users]))
     db.session.add(c)
+    db.session.commit()
+    db.session.add(ChatUser(chat_id=c.id, user_id=user_id))
+    for u in users: db.session.add(ChatUser(chat_id=c.id, user_id=u.id))
     db.session.commit()
     socketio.emit("new_chat")
     return jsonify({"ok": True, "chat_id": c.id})
 
-# --- Socket.IO ---
+# --- Socket.IO для звонков ---
 @socketio.on("register")
-def socket_register(data):
-    users_online[data['username']] = request.sid
-
-@socketio.on("join_chat")
-def join_chat(data):
-    join_room(data['chat_id'])
+def sock_register(data):
+    # можно хранить connected users если нужно
+    pass
 
 @socketio.on("call_user")
 def call_user(data):
-    to_sid = users_online.get(data['to'])
-    if to_sid:
-        emit("incoming_call", data, room=to_sid)
+    socketio.emit("incoming_call", data, to=data['to'])
 
 @socketio.on("answer_call")
 def answer_call(data):
-    to_sid = users_online.get(data['to'])
-    if to_sid:
-        emit("call_answered", data, room=to_sid)
+    socketio.emit("call_answered", data, to=data['to'])
 
 @socketio.on("end_call")
 def end_call(data):
-    to_sid = users_online.get(data['to'])
-    if to_sid:
-        emit("call_ended", data, room=to_sid)
+    socketio.emit("call_ended", data, to=data['to'])
 
-if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-    socketio.run(app, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
+if __name__=="__main__":
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port)
+
 
