@@ -11,7 +11,11 @@ class User(db.Model):
 class Chat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    last_message_id = db.Column(db.Integer, db.ForeignKey('message.id'))
+
+class ChatUser(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
 
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
